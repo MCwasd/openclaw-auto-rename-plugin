@@ -2,17 +2,90 @@
 
 > ⚠️ **已弃用 / Deprecated**
 >
-> OpenClaw 2026.7.x 已内置 dashboard 会话标题自动生成功能（通过 `agents.defaults.utilityModel` 配置），新版本无需此插件。
+> **中文：** OpenClaw 2026.7.x 已内置 dashboard 会话标题自动生成功能（通过 `agents.defaults.utilityModel` 配置），新版本无需此插件。内置功能在对话完成后由 gateway 直接调用模型生成标题，比本插件的轮询方案更快、更可靠。如果你在用较新版本的 OpenClaw，建议直接配置 `utilityModel` 而非安装此插件。本仓库保留作为存档和参考。
 >
-> 内置功能在对话完成后由 gateway 直接调用模型生成标题，比本插件的轮询方案更快、更可靠。如果你在用较新版本的 OpenClaw，建议直接配置 `utilityModel` 而非安装此插件。
->
-> 本仓库保留作为存档和参考。
+> **English:** OpenClaw 2026.7.x ships with built-in dashboard session title generation (configured via `agents.defaults.utilityModel`). The built-in feature triggers instantly after a conversation completes, outperforming this plugin's polling approach. If you're running a recent version of OpenClaw, configure `utilityModel` instead of installing this plugin. This repo is preserved as an archive and reference.
 
-## 这是什么
+---
+
+[English](#english) | [中文](#中文)
+
+---
+
+## English
+
+### What is this
+
+An [OpenClaw](https://github.com/openclaw/openclaw) plugin that automatically generates a 3-10 character Chinese session title after the first reply in a new conversation, and writes it to the `displayName` field in `sessions.json`.
+
+### Features
+
+- **Auto rename**: Detects new sessions, extracts the first user message and assistant reply, and generates a short Chinese title via LLM
+- **LLM mode**: Calls a local or remote LLM API to generate a summary title (defaults to local llama-server)
+- **Extract mode**: Falls back to keyword extraction from the first message when LLM is unavailable
+- **Reset detection**: Clears stale titles after a session reset, allowing re-naming on the next conversation
+- **Name guard**: Prevents the gateway from overwriting already-set displayNames
+
+### Configuration
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Enable/disable the plugin |
+| `pollIntervalMs` | integer | `8000` | Polling interval (ms) |
+| `titleMaxLen` | integer | `10` | Maximum title length (characters) |
+| `mode` | string | `"llm"` | Title generation mode: `llm` or `extract` |
+| `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | LLM API endpoint |
+| `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | LLM model name |
+| `llmApiKey` | string | `""` | LLM API key (auto-reads from env if empty) |
+
+### Installation
+
+Place the `auto-rename` folder into `~/.openclaw/plugins/` and restart the OpenClaw gateway.
+
+```bash
+cp -r auto-rename ~/.openclaw/plugins/
+openclaw gateway restart
+```
+
+### How it works
+
+1. On startup, the plugin polls `sessions.json` at a fixed interval (default 8s)
+2. When a new session without `displayName` is found, it reads the session JSONL file to extract the first user message and assistant reply
+3. Generates a 3-10 character Chinese title via LLM (or falls back to extraction)
+4. Writes the title to `sessions.json`'s `displayName` field
+5. Persists tracking info in `.auto-rename-tracker.json`
+
+### Why it's deprecated
+
+OpenClaw 2026.7.x introduced built-in session title generation at the gateway level:
+
+- The built-in feature triggers **instantly** upon conversation completion — no polling
+- A dedicated low-cost model can be assigned via `utilityModel`
+- No race condition with this plugin's polling mechanism
+
+With the built-in feature active, the gateway sets `displayName` within seconds of a conversation completing. By the time this plugin's 8-second poll detects the session, `displayName` already exists, so the plugin skips it — rendering it ineffective.
+
+### File structure
+
+```
+auto-rename/
+├── openclaw.plugin.json   # Plugin manifest (config schema)
+└── index.js               # Plugin logic (v2.2)
+```
+
+### License
+
+MIT
+
+---
+
+## 中文
+
+### 这是什么
 
 一个 [OpenClaw](https://github.com/openclaw/openclaw) 插件，用于在新对话首次回复后自动生成 3-10 字中文会话标题，并写入 `sessions.json` 的 `displayName` 字段。
 
-## 功能
+### 功能
 
 - **自动重命名**：检测新会话的首条用户消息和助手回复，通过 LLM 生成简短中文标题
 - **LLM 模式**：调用本地或远程 LLM API 生成摘要标题（默认使用本地 llama-server）
@@ -20,7 +93,7 @@
 - **Reset 检测**：会话被 reset 后清除旧标题，等待新对话重新命名
 - **名称守卫**：防止 gateway 覆盖已设置的 displayName（防回退）
 
-## 配置项
+### 配置项
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
@@ -32,7 +105,7 @@
 | `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | LLM 模型名 |
 | `llmApiKey` | string | `""` | LLM API 密钥（留空则自动读取环境变量） |
 
-## 安装
+### 安装
 
 将 `auto-rename` 文件夹放入 `~/.openclaw/plugins/` 目录下，重启 OpenClaw gateway 即可自动加载。
 
@@ -41,7 +114,7 @@ cp -r auto-rename ~/.openclaw/plugins/
 openclaw gateway restart
 ```
 
-## 工作原理
+### 工作原理
 
 1. 插件启动后定期轮询 `sessions.json`（默认每 8 秒）
 2. 发现没有 `displayName` 的新会话 → 读取会话 JSONL 文件提取首条用户消息和助手回复
@@ -49,7 +122,7 @@ openclaw gateway restart
 4. 写入 `sessions.json` 的 `displayName` 字段
 5. 同时记录到 `.auto-rename-tracker.json` 持久化跟踪
 
-## 为什么弃用
+### 为什么弃用
 
 OpenClaw 新版本（2026.7.x）在 gateway 层面内置了会话标题生成：
 
@@ -59,7 +132,7 @@ OpenClaw 新版本（2026.7.x）在 gateway 层面内置了会话标题生成：
 
 本插件的 8 秒轮询机制在新版本中会被 gateway 内置逻辑抢先设置 `displayName`，导致插件检测到已有标题后直接跳过，实际不再生效。
 
-## 文件结构
+### 文件结构
 
 ```
 auto-rename/
@@ -67,6 +140,6 @@ auto-rename/
 └── index.js               # 插件主逻辑（v2.2）
 ```
 
-## License
+### License
 
 MIT
