@@ -1,0 +1,54 @@
+{
+  "id": "auto-rename",
+  "name": "自动会话重命名",
+  "description": "新对话自动命名 + Reset检测 + 名称守卫防回退。检测会话重置并清空旧名，定期防gateway覆盖displayName。",
+  "version": "0.2.0",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "启用自动重命名"
+      },
+      "pollIntervalMs": {
+        "type": "integer",
+        "default": 8000,
+        "minimum": 2000,
+        "maximum": 60000,
+        "description": "轮询间隔（毫秒）"
+      },
+      "titleMaxLen": {
+        "type": "integer",
+        "default": 10,
+        "minimum": 3,
+        "maximum": 20,
+        "description": "标题最大字数"
+      },
+      "mode": {
+        "type": "string",
+        "default": "llm",
+        "enum": ["llm", "extract"],
+        "description": "标题生成模式: llm=调用LLM生成摘要, extract=从首条消息提取"
+      },
+      "llmEndpoint": {
+        "type": "string",
+        "default": "http://localhost:8081/v1/chat/completions",
+        "description": "LLM API端点（默认本地 llama-server）"
+      },
+      "llmModel": {
+        "type": "string",
+        "default": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+        "description": "LLM模型名（默认本地 Qwen3VL 2B GGUF）"
+      },
+      "llmApiKey": {
+        "type": "string",
+        "description": "LLM API密钥（留空则自动读取OpenClaw配置）"
+      }
+    }
+  }
+}
