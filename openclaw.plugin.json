@@ -2,7 +2,7 @@
   "id": "auto-rename",
   "name": "自动会话重命名",
   "description": "新对话自动命名 + Reset检测 + 名称守卫防回退。检测会话重置并清空旧名，定期防gateway覆盖displayName。",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "activation": {
     "onStartup": true
   },
@@ -34,6 +34,13 @@
         "default": "llm",
         "enum": ["llm", "extract"],
         "description": "标题生成模式: llm=调用LLM生成摘要, extract=从首条消息提取"
+      },
+      "retryMaxAttempts": {
+        "type": "integer",
+        "default": 30,
+        "minimum": 1,
+        "maximum": 300,
+        "description": "本地 LLM 不可用时的最大轮询重试次数，超出后才使用文本回退"
       },
       "llmEndpoint": {
         "type": "string",

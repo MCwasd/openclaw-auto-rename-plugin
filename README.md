@@ -1,145 +1,315 @@
 # OpenClaw Auto-Rename Plugin
 
-> ⚠️ **已弃用 / Deprecated**
->
-> **中文：** OpenClaw 2026.7.x 已内置 dashboard 会话标题自动生成功能（通过 `agents.defaults.utilityModel` 配置），新版本无需此插件。内置功能在对话完成后由 gateway 直接调用模型生成标题，比本插件的轮询方案更快、更可靠。如果你在用较新版本的 OpenClaw，建议直接配置 `utilityModel` 而非安装此插件。本仓库保留作为存档和参考。
->
-> **English:** OpenClaw 2026.7.x ships with built-in dashboard session title generation (configured via `agents.defaults.utilityModel`). The built-in feature triggers instantly after a conversation completes, outperforming this plugin's polling approach. If you're running a recent version of OpenClaw, configure `utilityModel` instead of installing this plugin. This repo is preserved as an archive and reference.
-
----
-
 [English](#english) | [中文](#中文)
+
+> OpenClaw 2026.7.1 includes built-in session-title generation, but this plugin remains useful when you want a local model, a customizable prompt, stricter title formatting, retry behavior, and full control over naming quality.
+>
+> OpenClaw 2026.7.1 已内置会话标题生成，但如果你希望使用本地模型、自定义提示词、严格控制标题格式、支持失败重试，并获得更自由的命名效果，本插件仍然有价值。
 
 ---
 
 ## English
 
-### What is this
+### Overview
 
-An [OpenClaw](https://github.com/openclaw/openclaw) plugin that automatically generates a 3-10 character Chinese session title after the first reply in a new conversation, and writes it to the `displayName` field in `sessions.json`.
+An OpenClaw plugin that generates a concise Chinese title for a new conversation after the first assistant reply and writes it to the session's `displayName`.
+
+Unlike OpenClaw's built-in title generator, this plugin can call any OpenAI-compatible local or remote endpoint. It defaults to a local `llama-server`, so title generation can stay private and avoid cloud-model costs.
+
+### Why use this instead of the built-in generator?
+
+OpenClaw 2026.7.1 added built-in dashboard session-title generation through `agents.defaults.utilityModel`. The built-in implementation is convenient, but its prompt and output handling are fixed. In practice, some models may return a full answer instead of a short title.
+
+This plugin provides:
+
+- A fully customizable local or remote LLM endpoint
+- A stricter Chinese title prompt
+- Configurable title length
+- Validation and cleanup of model output
+- Retry behavior when the local model is still starting
+- Deterministic extraction fallback after repeated failures
+- Session reset detection and automatic re-naming
+- A name guard that restores plugin-managed titles if overwritten
+- No required cloud LLM calls when used with a local server
+
+### Important: disable OpenClaw's built-in title generator
+
+Both implementations write `displayName`. OpenClaw's built-in generator usually runs first, causing this plugin to see an existing title and skip the session.
+
+OpenClaw 2026.7.1 does not currently expose a dedicated disable switch. Setting `utilityModel` to the string `"none"` is **not** a disable flag; it is parsed as a model reference.
+
+A practical workaround is to configure an intentionally unavailable full model reference:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "utilityModel": "disabled/none"
+    }
+  }
+}
+```
+
+This makes built-in utility-model title generation return no result without falling back to the primary model. It also disables other `utilityModel` tasks, such as generated Telegram topic titles and Discord auto-thread titles.
 
 ### Features
 
-- **Auto rename**: Detects new sessions, extracts the first user message and assistant reply, and generates a short Chinese title via LLM
-- **LLM mode**: Calls a local or remote LLM API to generate a summary title (defaults to local llama-server)
-- **Extract mode**: Falls back to keyword extraction from the first message when LLM is unavailable
-- **Reset detection**: Clears stale titles after a session reset, allowing re-naming on the next conversation
-- **Name guard**: Prevents the gateway from overwriting already-set displayNames
+- **Automatic naming** after the first complete assistant reply
+- **LLM mode** using an OpenAI-compatible Chat Completions endpoint
+- **Extract mode** for deterministic naming without an LLM
+- **Local-model retries** before permanent fallback
+- **Output cleanup** for quotes, prefixes, Markdown wrappers, and generic suffixes
+- **Reset detection** to clear an old title after a session reset
+- **Name guard** to restore plugin-managed titles
+- **Persistent tracker** stored in `.auto-rename-tracker.json`
+
+### What's new in v2.3
+
+- Retry local LLM failures instead of permanently accepting a poor fallback immediately
+- Fix title parsing that could turn `自动重命名插件更新说明` into `件更新说明`
+- Improve the title prompt and add a dedicated system message
+- Remove generic suffixes such as `更新说明` when appropriate
+- Reduce completion budget from 80 to 32 tokens
+- Remove the module-level singleton guard that could break plugin hot reload
+
+### Installation
+
+Clone or download the repository into the OpenClaw plugin directory:
+
+```bash
+git clone https://github.com/MCwasd/openclaw-auto-rename-plugin.git \
+  ~/.openclaw/plugins/auto-rename
+```
+
+Add the plugin path and configuration to `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "utilityModel": "disabled/none"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "auto-rename": {
+        "enabled": true,
+        "config": {
+          "llmEndpoint": "http://localhost:8081/v1/chat/completions",
+          "llmModel": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+          "llmApiKey": "",
+          "retryMaxAttempts": 30
+        }
+      }
+    },
+    "load": {
+      "paths": [
+        "~/.openclaw/plugins/auto-rename/"
+      ]
+    }
+  }
+}
+```
+
+Restart the Gateway after installing or updating plugin source files:
+
+```bash
+openclaw gateway restart
+```
+
+OpenClaw may hot-reload plugin configuration, but Node.js module caching can keep old plugin source active. A restart is recommended after source-code updates.
 
 ### Configuration
 
 | Field | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | boolean | `true` | Enable/disable the plugin |
-| `pollIntervalMs` | integer | `8000` | Polling interval (ms) |
-| `titleMaxLen` | integer | `10` | Maximum title length (characters) |
-| `mode` | string | `"llm"` | Title generation mode: `llm` or `extract` |
-| `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | LLM API endpoint |
-| `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | LLM model name |
-| `llmApiKey` | string | `""` | LLM API key (auto-reads from env if empty) |
+|---|---|---:|---|
+| `enabled` | boolean | `true` | Enable the plugin |
+| `pollIntervalMs` | integer | `8000` | Session polling interval in milliseconds |
+| `titleMaxLen` | integer | `10` | Maximum title length |
+| `mode` | string | `llm` | `llm` or deterministic `extract` mode |
+| `retryMaxAttempts` | integer | `30` | Failed LLM polls before extraction fallback |
+| `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | OpenAI-compatible endpoint |
+| `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | Model name sent to the endpoint |
+| `llmApiKey` | string | empty | Optional Bearer token; local endpoints need no key |
 
-### Installation
-
-Place the `auto-rename` folder into `~/.openclaw/plugins/` and restart the OpenClaw gateway.
-
-```bash
-cp -r auto-rename ~/.openclaw/plugins/
-openclaw gateway restart
-```
+With the default 8-second polling interval and 30 attempts, the plugin waits for approximately four minutes before using extraction fallback.
 
 ### How it works
 
-1. On startup, the plugin polls `sessions.json` at a fixed interval (default 8s)
-2. When a new session without `displayName` is found, it reads the session JSONL file to extract the first user message and assistant reply
-3. Generates a 3-10 character Chinese title via LLM (or falls back to extraction)
-4. Writes the title to `sessions.json`'s `displayName` field
-5. Persists tracking info in `.auto-rename-tracker.json`
+1. Polls the agent session store.
+2. Finds sessions without an explicit `displayName`.
+3. Waits for the first complete assistant reply.
+4. Extracts the first user message and assistant reply.
+5. Requests a short Chinese title from the configured model.
+6. Retries temporary LLM failures.
+7. Cleans and truncates the model output.
+8. Writes the title to `sessions.json` and records it in `.auto-rename-tracker.json`.
+9. Periodically restores tracked titles if another process overwrites them.
 
-### Why it's deprecated
+### Local llama-server example
 
-OpenClaw 2026.7.x introduced built-in session title generation at the gateway level:
-
-- The built-in feature triggers **instantly** upon conversation completion — no polling
-- A dedicated low-cost model can be assigned via `utilityModel`
-- No race condition with this plugin's polling mechanism
-
-With the built-in feature active, the gateway sets `displayName` within seconds of a conversation completing. By the time this plugin's 8-second poll detects the session, `displayName` already exists, so the plugin skips it — rendering it ineffective.
-
-### File structure
-
-```
-auto-rename/
-├── openclaw.plugin.json   # Plugin manifest (config schema)
-└── index.js               # Plugin logic (v2.2)
+```bash
+llama-server \
+  --host 0.0.0.0 \
+  --port 8081 \
+  -m /path/to/model.gguf \
+  -c 8192
 ```
 
-### License
-
-MIT
+Any OpenAI-compatible `/v1/chat/completions` server can be used.
 
 ---
 
 ## 中文
 
-### 这是什么
+### 简介
 
-一个 [OpenClaw](https://github.com/openclaw/openclaw) 插件，用于在新对话首次回复后自动生成 3-10 字中文会话标题，并写入 `sessions.json` 的 `displayName` 字段。
+这是一个 OpenClaw 会话自动重命名插件。新会话完成首次助手回复后，插件会根据首条用户消息和助手回复生成简洁的中文标题，并写入会话的 `displayName`。
+
+与 OpenClaw 内置功能相比，本插件可以连接任意兼容 OpenAI Chat Completions API 的本地或远程模型。默认使用本地 `llama-server`，因此可以避免云端标题调用费用，并让会话内容留在本机。
+
+### 为什么新版 OpenClaw 仍可能需要这个插件？
+
+OpenClaw 2026.7.1 已通过 `agents.defaults.utilityModel` 内置 Dashboard 会话标题生成。但内置功能的提示词和输出处理逻辑是固定的，部分模型可能不按要求返回短标题，而是直接回答用户问题，产生很长、质量较差的标题。
+
+本插件提供：
+
+- 可自由指定本地或远程 LLM 端点
+- 更严格的中文标题提示词
+- 可配置的标题长度
+- 模型输出校验与清洗
+- 本地模型启动较慢时自动重试
+- 多次失败后才使用确定性文本回退
+- 会话 Reset 检测和重新命名
+- 标题守卫，防止插件生成的标题被覆盖
+- 配合本地模型使用时不产生云端 LLM 调用
+
+### 重要：禁用 OpenClaw 内置标题生成
+
+内置功能和本插件都会写入 `displayName`。内置功能通常先执行，导致插件检测到已有标题后跳过该会话。
+
+OpenClaw 2026.7.1 暂时没有提供专门的关闭开关。将 `utilityModel` 设置为字符串 `"none"` **并不表示禁用**，它仍会被当作模型引用解析。
+
+目前可使用一个明确不存在的完整模型引用：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "utilityModel": "disabled/none"
+    }
+  }
+}
+```
+
+这样内置 utility model 在准备阶段就会返回空结果，不再回退到主模型。注意：这也会同时禁用 Telegram Topic 标题、Discord 自动线程标题等其他 `utilityModel` 任务。
 
 ### 功能
 
-- **自动重命名**：检测新会话的首条用户消息和助手回复，通过 LLM 生成简短中文标题
-- **LLM 模式**：调用本地或远程 LLM API 生成摘要标题（默认使用本地 llama-server）
-- **Extract 模式**：LLM 不可用时回退到从首条消息提取关键词
-- **Reset 检测**：会话被 reset 后清除旧标题，等待新对话重新命名
-- **名称守卫**：防止 gateway 覆盖已设置的 displayName（防回退）
+- **自动重命名**：首次助手回复完成后生成标题
+- **LLM 模式**：调用兼容 OpenAI 的 Chat Completions API
+- **Extract 模式**：无需 LLM 的确定性标题提取
+- **本地模型重试**：模型尚未启动时不会立即永久回退
+- **输出清洗**：处理引号、Markdown、标题前缀和空泛后缀
+- **Reset 检测**：会话重置后清除旧标题并重新命名
+- **名称守卫**：恢复被其他进程覆盖的插件标题
+- **持久化追踪**：记录在 `.auto-rename-tracker.json`
+
+### v2.3 更新内容
+
+- 本地 LLM 暂时不可用时自动重试，不再立即留下劣质回退标题
+- 修复将“自动重命名插件更新说明”错误解析成“件更新说明”的问题
+- 强化中文标题提示词，并加入独立 system message
+- 适当移除“更新说明”等信息量较低的尾缀
+- 将最大生成量从 80 tokens 降至 32 tokens
+- 移除可能导致插件热重载失效的模块级单例锁
+
+### 安装
+
+将仓库克隆到 OpenClaw 插件目录：
+
+```bash
+git clone https://github.com/MCwasd/openclaw-auto-rename-plugin.git \
+  ~/.openclaw/plugins/auto-rename
+```
+
+在 `~/.openclaw/openclaw.json` 中加入：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "utilityModel": "disabled/none"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "auto-rename": {
+        "enabled": true,
+        "config": {
+          "llmEndpoint": "http://localhost:8081/v1/chat/completions",
+          "llmModel": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
+          "llmApiKey": "",
+          "retryMaxAttempts": 30
+        }
+      }
+    },
+    "load": {
+      "paths": [
+        "~/.openclaw/plugins/auto-rename/"
+      ]
+    }
+  }
+}
+```
+
+安装或更新插件源码后重启 Gateway：
+
+```bash
+openclaw gateway restart
+```
+
+OpenClaw 可以热加载插件配置，但 Node.js 模块缓存可能继续运行旧源码，因此修改插件源码后建议重启。
 
 ### 配置项
 
 | 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `enabled` | boolean | `true` | 启用/禁用插件 |
-| `pollIntervalMs` | integer | `8000` | 轮询间隔（毫秒） |
-| `titleMaxLen` | integer | `10` | 标题最大字数 |
-| `mode` | string | `"llm"` | 标题生成模式：`llm` 或 `extract` |
-| `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | LLM API 端点 |
-| `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | LLM 模型名 |
-| `llmApiKey` | string | `""` | LLM API 密钥（留空则自动读取环境变量） |
+|---|---|---:|---|
+| `enabled` | boolean | `true` | 是否启用插件 |
+| `pollIntervalMs` | integer | `8000` | 会话轮询间隔，单位毫秒 |
+| `titleMaxLen` | integer | `10` | 标题最大长度 |
+| `mode` | string | `llm` | `llm` 或确定性的 `extract` 模式 |
+| `retryMaxAttempts` | integer | `30` | LLM 连续失败多少次后使用文本回退 |
+| `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | OpenAI 兼容 API 端点 |
+| `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | 请求中发送的模型名 |
+| `llmApiKey` | string | 空 | 可选 Bearer Token；本地端点无需填写 |
 
-### 安装
-
-将 `auto-rename` 文件夹放入 `~/.openclaw/plugins/` 目录下，重启 OpenClaw gateway 即可自动加载。
-
-```bash
-cp -r auto-rename ~/.openclaw/plugins/
-openclaw gateway restart
-```
+默认每 8 秒轮询一次、最多重试 30 次，因此会等待本地模型约 4 分钟，再使用文本提取回退。
 
 ### 工作原理
 
-1. 插件启动后定期轮询 `sessions.json`（默认每 8 秒）
-2. 发现没有 `displayName` 的新会话 → 读取会话 JSONL 文件提取首条用户消息和助手回复
-3. 调用 LLM 或从消息中提取 3-10 字中文标题
-4. 写入 `sessions.json` 的 `displayName` 字段
-5. 同时记录到 `.auto-rename-tracker.json` 持久化跟踪
+1. 定期读取 Agent 会话存储。
+2. 找出尚未设置 `displayName` 的会话。
+3. 等待首次助手回复完整结束。
+4. 提取首条用户消息和助手回复。
+5. 请求配置的模型生成简短中文标题。
+6. 本地模型暂时不可用时继续重试。
+7. 清洗并截断模型输出。
+8. 将标题写入 `sessions.json`，并记录到 `.auto-rename-tracker.json`。
+9. 定期检查标题是否被覆盖，必要时自动恢复。
 
-### 为什么弃用
+### 本地 llama-server 示例
 
-OpenClaw 新版本（2026.7.x）在 gateway 层面内置了会话标题生成：
-
-- 内置功能在对话完成的**瞬间**即时触发，无需轮询
-- 通过 `utilityModel` 配置可指定专用低成本模型
-- 不存在与本插件的竞态问题
-
-本插件的 8 秒轮询机制在新版本中会被 gateway 内置逻辑抢先设置 `displayName`，导致插件检测到已有标题后直接跳过，实际不再生效。
-
-### 文件结构
-
-```
-auto-rename/
-├── openclaw.plugin.json   # 插件清单（配置 schema）
-└── index.js               # 插件主逻辑（v2.2）
+```bash
+llama-server \
+  --host 0.0.0.0 \
+  --port 8081 \
+  -m /path/to/model.gguf \
+  -c 8192
 ```
 
-### License
+也可以使用其他兼容 OpenAI `/v1/chat/completions` 接口的服务。
+
+## License
 
 MIT

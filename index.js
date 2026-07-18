@@ -1,16 +1,16 @@
 // Auto-Rename Plugin for OpenClaw
 // 自动检测新对话并在首次回复后生成会话名
-// v2.2 - 新增：Reset检测 + 名称守卫（防回退）
-// - Reset检测：会话重置后清除旧名称和tracker，等待新对话重命名
-// - 名称守卫：gateway覆盖displayName时自动恢复
+// v2.3 - 修复：LLM 不可用重试 + 标题解析
+// - 本地 LLM 暂时不可用时不再立即永久回退，保留会话等待后续轮询重试
+// - 修复长中文标题错误截取最后一段的问题（如“件更新说明”）
+// - 强化提示词，优先去除“更新说明”等空泛后缀
 import { definePluginEntry, createSubsystemLogger } from "openclaw/plugin-sdk/core";
 import fs from "node:fs";
 import path from "node:path";
 
 const log = createSubsystemLogger("auto-rename");
 
-// === Singleton guard ===
-let _registered = false;
+// 插件生命周期由 OpenClaw 管理；不要使用模块级单例锁，避免热重载后显示 enabled 但轮询器未启动。
 
 // === Persistent tracker ===
 function getTrackerPath(sessionsDir) {
@@ -116,30 +116,29 @@ function extractFirstAssistantReply(sessionFile) {
 function extractTitleFromLLMOutput(text, maxLen = 10) {
   if (!text) return null;
   let cleaned = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(line => line.trim())
+    .find(line => line && !line.startsWith("```")) || "";
+
+  cleaned = cleaned
+    .replace(/^\s*(?:标题|title)\s*[：:]\s*/i, "")
     .replace(/^(我们|需要|要求|需用|根据|用户|让我们).*?(标题|概括|可以).{0,10}?[：:]/s, "")
     .replace(/^(所以|因此|最终|直接|最).{0,5}?[：:]/s, "")
-    .replace(/^[「『""]/, "")
-    .replace(/[」』""]$/, "")
+    .replace(/^[「『“”"'`*]+|[」』“”"'`*]+$/g, "")
+    .replace(/\s+/g, "")
     .trim();
 
-  const chineseWords = cleaned.match(/[\u4e00-\u9fff]{2,6}/g);
-  if (chineseWords && chineseWords.length > 0) {
-    const last = chineseWords[chineseWords.length - 1];
-    if (last.length >= 2 && last.length <= maxLen) return last;
-    if (chineseWords.length >= 2) {
-      const prev = chineseWords[chineseWords.length - 2];
-      if (prev.length >= 2 && prev.length <= maxLen) return prev;
-    }
-    if (last.length > maxLen) return last.slice(0, maxLen);
-  }
+  if (!cleaned) return null;
 
-  const first = cleaned.replace(/[^\u4e00-\u9fff]/g, "").trim();
-  if (first.length >= 2) return first.slice(0, maxLen);
+  // 去掉模型常加但信息量很低的尾缀，避免标题被截成“件更新说明”。
+  cleaned = cleaned.replace(/(?:相关)?(?:更新|使用|功能|问题)?说明$/, "");
 
-  const justText = cleaned.replace(/[，。！？、；：""「」『』【】\[\](){}<>《》\n\r\s]+/g, "").trim();
-  if (justText.length >= 2) return justText.slice(0, maxLen);
+  const chineseOnly = cleaned.replace(/[^\u4e00-\u9fff]/g, "");
+  if (chineseOnly.length >= 2) return chineseOnly.slice(0, maxLen);
 
-  return null;
+  const compact = cleaned.replace(/[，。！？、；：:「」『』【】\[\](){}<>《》\n\r\s]+/g, "");
+  return compact.length >= 2 ? compact.slice(0, maxLen) : null;
 }
 
 // === Generate title via LLM ===
@@ -156,7 +155,7 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
 
   const userMsg = (firstUserMsg || "").slice(0, 150);
   const assistantMsg = (firstAssistantMsg || "").slice(0, 150);
-  const prompt = `生成3-10字中文标题概括对话主题。\n用户说：${userMsg}\n${assistantMsg ? `助手说：${assistantMsg}\n` : ""}\n[TITLE]`;
+  const prompt = `请为下面的对话生成一个简洁、具体的中文标题。\n要求：\n- 只输出标题，不要解释、引号或“标题：”前缀\n- 3-${config.titleMaxLen || 10}个汉字\n- 保留核心对象和动作，避免“问题说明”“更新说明”“相关讨论”等空泛表达\n\n用户：${userMsg}\n${assistantMsg ? `助手：${assistantMsg}\n` : ""}`;
 
   try {
     const headers = { "Content-Type": "application/json" };
@@ -167,8 +166,11 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
       headers,
       body: JSON.stringify({
         model: model.includes("/") ? model.split("/").pop() : model,
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 80,
+        messages: [
+          { role: "system", content: "你是中文会话标题生成器。严格只输出一个简短标题。" },
+          { role: "user", content: prompt }
+        ],
+        max_tokens: 32,
         temperature: 0.2,
       }),
       signal: AbortSignal.timeout(10000),
@@ -219,9 +221,6 @@ export default definePluginEntry({
   name: "自动会话重命名",
   description: "新对话首次回复后自动根据上下文生成会话名",
   register(api) {
-    if (_registered) { log.info("Singleton guard prevented duplicate"); return; }
-    _registered = true;
-
     const config = api.pluginConfig || {};
     if (config.enabled === false) { log.info("Plugin disabled"); return; }
 
@@ -229,10 +228,11 @@ export default definePluginEntry({
     const titleMaxLen = config.titleMaxLen || 10;
     const mode = config.mode || "llm";
 
-    log.info(`v2.2 started (interval=${pollIntervalMs}ms, mode=${mode})`);
+    log.info(`v2.3 started (interval=${pollIntervalMs}ms, mode=${mode})`);
 
     const renamedSessions = new Set();
     const waitingSessions = new Set();
+    const llmFailureCounts = new Map();
 
     function getSessionsDir() {
       const homeDir = process.env.HOME || process.env.USERPROFILE || "/tmp";
@@ -373,6 +373,18 @@ export default definePluginEntry({
           let title = null;
           if (mode === "llm") {
             title = await generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config);
+            if (!title) {
+              const failures = (llmFailureCounts.get(sessionKey) || 0) + 1;
+              llmFailureCounts.set(sessionKey, failures);
+              const retryMaxAttempts = config.retryMaxAttempts || 30;
+              if (failures < retryMaxAttempts) {
+                log.info(`⏳ LLM unavailable/invalid; retry ${failures}/${retryMaxAttempts} → ${sessionKey.slice(0, 48)}...`);
+                continue;
+              }
+              log.warn(`LLM failed ${failures} times; using extract fallback → ${sessionKey.slice(0, 48)}...`);
+            } else {
+              llmFailureCounts.delete(sessionKey);
+            }
           }
           if (!title) {
             title = extractTitle(firstUserMsg, titleMaxLen);
@@ -418,7 +430,6 @@ export default definePluginEntry({
       if (typeof api.runtime?.lifecycle?.onCleanup === 'function') {
         api.runtime.lifecycle.onCleanup(() => {
           clearInterval(intervalId);
-          _registered = false;
           log.info("Stopped");
         });
       }
