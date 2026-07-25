@@ -2,7 +2,7 @@
   "id": "auto-rename",
   "name": "自动会话重命名",
   "description": "新对话自动命名。代码侧零限制，标题质量完全由模型提示词决定。",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "activation": {
     "onStartup": true
   },
