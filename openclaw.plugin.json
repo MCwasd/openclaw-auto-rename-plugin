@@ -1,8 +1,8 @@
 {
   "id": "auto-rename",
   "name": "自动会话重命名",
-  "description": "新对话自动命名 + Reset检测 + 名称守卫防回退。检测会话重置并清空旧名，定期防gateway覆盖displayName。",
-  "version": "0.2.1",
+  "description": "新对话自动命名。代码侧零限制，标题质量完全由模型提示词决定。",
+  "version": "0.2.6",
   "activation": {
     "onStartup": true
   },
@@ -27,7 +27,7 @@
         "default": 10,
         "minimum": 3,
         "maximum": 20,
-        "description": "标题最大字数"
+        "description": "文本回退模式的标题最大字数；LLM 模式固定要求输出少于 10 字符"
       },
       "mode": {
         "type": "string",
@@ -37,7 +37,7 @@
       },
       "retryMaxAttempts": {
         "type": "integer",
-        "default": 30,
+        "default": 5,
         "minimum": 1,
         "maximum": 300,
         "description": "本地 LLM 不可用时的最大轮询重试次数，超出后才使用文本回退"

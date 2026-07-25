@@ -63,14 +63,16 @@ This makes built-in utility-model title generation return no result without fall
 - **Name guard** to restore plugin-managed titles
 - **Persistent tracker** stored in `.auto-rename-tracker.json`
 
-### What's new in v2.3
+### What's new in v2.8
 
-- Retry local LLM failures instead of permanently accepting a poor fallback immediately
-- Fix title parsing that could turn `自动重命名插件更新说明` into `件更新说明`
-- Improve the title prompt and add a dedicated system message
-- Remove generic suffixes such as `更新说明` when appropriate
-- Reduce completion budget from 80 to 32 tokens
-- Remove the module-level singleton guard that could break plugin hot reload
+- Remove ALL plugin-side validation, cleaning, and character-count enforcement
+- Title quality is entirely governed by the model prompt; the plugin only writes whatever the model outputs
+- The prompt guides the model toward concise, informative titles without imposing hard limits
+- Eliminate the earlier retry/compression loop and all rejection rules
+- Stop deleting or rejecting useful words such as `更新`, `使用`, `功能`, `问题`, and `说明`
+- Disable the previous minimum-length, generic-title, incomplete-phrase, digit, core-object, identifier, punctuation, and prefix rules; keep them documented in source comments for selective restoration
+- Improve the prompt to favor an accurate “core object + concrete intent” title without forcing every technical identifier into it
+- When the first model output is too long, feed that exact output back once for compression; the final acceptance rule remains only non-empty and shorter than 10 characters
 
 ### Installation
 
@@ -98,7 +100,7 @@ Add the plugin path and configuration to `~/.openclaw/openclaw.json`:
           "llmEndpoint": "http://localhost:8081/v1/chat/completions",
           "llmModel": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
           "llmApiKey": "",
-          "retryMaxAttempts": 30
+          "retryMaxAttempts": 5
         }
       }
     },
@@ -127,12 +129,12 @@ OpenClaw may hot-reload plugin configuration, but Node.js module caching can kee
 | `pollIntervalMs` | integer | `8000` | Session polling interval in milliseconds |
 | `titleMaxLen` | integer | `10` | Maximum title length |
 | `mode` | string | `llm` | `llm` or deterministic `extract` mode |
-| `retryMaxAttempts` | integer | `30` | Failed LLM polls before extraction fallback |
+| `retryMaxAttempts` | integer | `5` | Failed LLM polls before extraction fallback |
 | `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | OpenAI-compatible endpoint |
 | `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | Model name sent to the endpoint |
 | `llmApiKey` | string | empty | Optional Bearer token; local endpoints need no key |
 
-With the default 8-second polling interval and 30 attempts, the plugin waits for approximately four minutes before using extraction fallback.
+With the default 8-second polling interval and 5 attempts, the plugin waits for approximately 40 seconds before using extraction fallback.
 
 ### How it works
 
@@ -215,14 +217,16 @@ OpenClaw 2026.7.1 暂时没有提供专门的关闭开关。将 `utilityModel` �
 - **名称守卫**：恢复被其他进程覆盖的插件标题
 - **持久化追踪**：记录在 `.auto-rename-tracker.json`
 
-### v2.3 更新内容
+### v2.8 更新内容
 
-- 本地 LLM 暂时不可用时自动重试，不再立即留下劣质回退标题
-- 修复将“自动重命名插件更新说明”错误解析成“件更新说明”的问题
-- 强化中文标题提示词，并加入独立 system message
-- 适当移除“更新说明”等信息量较低的尾缀
-- 将最大生成量从 80 tokens 降至 32 tokens
-- 移除可能导致插件热重载失效的模块级单例锁
+- 移除全部插件侧校验、清洗和字符数限制
+- 标题质量完全由模型提示词控制；插件只负责写入模型输出
+- 提示词引导模型生成简洁清晰的标题，但不设硬性门槛
+- 去除此前的压缩重试循环和所有拒绝规则
+- 不再删除或拒绝“更新、使用、功能、问题、说明”等有用词语
+- 暂停最短长度、空泛标题、残句、数字、核心对象、英文标识符、标点和前缀等限制，并在源码注释中保留规则说明，便于以后按需逐项恢复
+- 优化提示词，优先生成“核心对象 + 具体意图”的准确标题，但不强迫所有技术名词都进入标题
+- 首次输出超长时，将原始标题反馈给模型压缩一次；最终仍只按非空且少于 10 字符验收
 
 ### 安装
 
@@ -250,7 +254,7 @@ git clone https://github.com/MCwasd/openclaw-auto-rename-plugin.git \
           "llmEndpoint": "http://localhost:8081/v1/chat/completions",
           "llmModel": "Qwen3VL-2B-Instruct-Q4_K_M.gguf",
           "llmApiKey": "",
-          "retryMaxAttempts": 30
+          "retryMaxAttempts": 5
         }
       }
     },
@@ -279,12 +283,12 @@ OpenClaw 可以热加载插件配置，但 Node.js 模块缓存可能继续运�
 | `pollIntervalMs` | integer | `8000` | 会话轮询间隔，单位毫秒 |
 | `titleMaxLen` | integer | `10` | 标题最大长度 |
 | `mode` | string | `llm` | `llm` 或确定性的 `extract` 模式 |
-| `retryMaxAttempts` | integer | `30` | LLM 连续失败多少次后使用文本回退 |
+| `retryMaxAttempts` | integer | `5` | LLM 连续失败多少次后使用文本回退 |
 | `llmEndpoint` | string | `http://localhost:8081/v1/chat/completions` | OpenAI 兼容 API 端点 |
 | `llmModel` | string | `Qwen3VL-2B-Instruct-Q4_K_M.gguf` | 请求中发送的模型名 |
 | `llmApiKey` | string | 空 | 可选 Bearer Token；本地端点无需填写 |
 
-默认每 8 秒轮询一次、最多重试 30 次，因此会等待本地模型约 4 分钟，再使用文本提取回退。
+默认每 8 秒轮询一次、最多重试 5 次，因此会等待本地模型约 40 秒，再使用文本提取回退。
 
 ### 工作原理
 

@@ -1,9 +1,8 @@
 // Auto-Rename Plugin for OpenClaw
 // 自动检测新对话并在首次回复后生成会话名
-// v2.3 - 修复：LLM 不可用重试 + 标题解析
-// - 本地 LLM 暂时不可用时不再立即永久回退，保留会话等待后续轮询重试
-// - 修复长中文标题错误截取最后一段的问题（如“件更新说明”）
-// - 强化提示词，优先去除“更新说明”等空泛后缀
+// v2.8 - 极简：代码侧零限制，标题质量完全由模型提示词决定
+// - 不校验字符数、不删词、不压缩、不拒绝任何非空输出
+// - 插件唯一工作：调模型 → 拿到输出 → 写入 displayName
 import { definePluginEntry, createSubsystemLogger } from "openclaw/plugin-sdk/core";
 import fs from "node:fs";
 import path from "node:path";
@@ -112,36 +111,8 @@ function extractFirstAssistantReply(sessionFile) {
   return "";
 }
 
-// === Extract a clean Chinese title from LLM output ===
-function extractTitleFromLLMOutput(text, maxLen = 10) {
-  if (!text) return null;
-  let cleaned = text
-    .replace(/\r/g, "")
-    .split("\n")
-    .map(line => line.trim())
-    .find(line => line && !line.startsWith("```")) || "";
-
-  cleaned = cleaned
-    .replace(/^\s*(?:标题|title)\s*[：:]\s*/i, "")
-    .replace(/^(我们|需要|要求|需用|根据|用户|让我们).*?(标题|概括|可以).{0,10}?[：:]/s, "")
-    .replace(/^(所以|因此|最终|直接|最).{0,5}?[：:]/s, "")
-    .replace(/^[「『“”"'`*]+|[」』“”"'`*]+$/g, "")
-    .replace(/\s+/g, "")
-    .trim();
-
-  if (!cleaned) return null;
-
-  // 去掉模型常加但信息量很低的尾缀，避免标题被截成“件更新说明”。
-  cleaned = cleaned.replace(/(?:相关)?(?:更新|使用|功能|问题)?说明$/, "");
-
-  const chineseOnly = cleaned.replace(/[^\u4e00-\u9fff]/g, "");
-  if (chineseOnly.length >= 2) return chineseOnly.slice(0, maxLen);
-
-  const compact = cleaned.replace(/[，。！？、；：:「」『』【】\[\](){}<>《》\n\r\s]+/g, "");
-  return compact.length >= 2 ? compact.slice(0, maxLen) : null;
-}
-
 // === Generate title via LLM ===
+// 代码不对模型输出做任何校验或清洗。质量由提示词控制。
 async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
   let apiKey = config.llmApiKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY || "";
   let endpoint = config.llmEndpoint || "http://localhost:8081/v1/chat/completions";
@@ -153,9 +124,17 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
     return null;
   }
 
-  const userMsg = (firstUserMsg || "").slice(0, 150);
-  const assistantMsg = (firstAssistantMsg || "").slice(0, 150);
-  const prompt = `请为下面的对话生成一个简洁、具体的中文标题。\n要求：\n- 只输出标题，不要解释、引号或“标题：”前缀\n- 3-${config.titleMaxLen || 10}个汉字\n- 保留核心对象和动作，避免“问题说明”“更新说明”“相关讨论”等空泛表达\n\n用户：${userMsg}\n${assistantMsg ? `助手：${assistantMsg}\n` : ""}`;
+  const userMsg = (firstUserMsg || "").slice(0, 300);
+  const prompt = `根据用户消息生成一个简洁清晰的中文会话标题。
+
+要求：
+- 用"核心对象 + 具体意图"概括，不要照抄原句
+- 英文产品名、技术名词、型号和数字按需保留
+- 优先简练，但信息完整比刻意短更重要
+- 只输出标题，不要解释、前缀、引号、换行
+
+用户消息：${userMsg}
+标题：`;
 
   try {
     const headers = { "Content-Type": "application/json" };
@@ -167,13 +146,14 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
       body: JSON.stringify({
         model: model.includes("/") ? model.split("/").pop() : model,
         messages: [
-          { role: "system", content: "你是中文会话标题生成器。严格只输出一个简短标题。" },
+          { role: "system", content: "你是会话标题生成器。根据对话主题输出简洁清晰的中文标题。保留核心对象和意图，保留英文产品名和数字。只输出标题，不要解释。" },
           { role: "user", content: prompt }
         ],
-        max_tokens: 32,
+        max_tokens: 48,
         temperature: 0.2,
+        chat_template_kwargs: { enable_thinking: false },
       }),
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(60000),
     });
 
     if (!resp.ok) {
@@ -182,19 +162,8 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
     }
 
     const result = await resp.json();
-    const msg = result?.choices?.[0]?.message || {};
-    const content = (msg.content || "").trim();
-    const reasoning = (msg.reasoning_content || "").trim();
-
-    let text = content || reasoning;
-    if (!text) return null;
-
-    const pureChinese = text.replace(/[^\u4e00-\u9fff]/g, "");
-    if (pureChinese.length >= 2 && pureChinese.length <= (config.titleMaxLen || 10)) {
-      return pureChinese;
-    }
-
-    return extractTitleFromLLMOutput(text, config.titleMaxLen || 10);
+    const content = (result?.choices?.[0]?.message?.content || "").trim();
+    return content || null;
   } catch (err) {
     log.warn(`LLM call: ${err.message}`);
     return null;
@@ -202,11 +171,17 @@ async function generateTitleViaLLM(firstUserMsg, firstAssistantMsg, config) {
 }
 
 // === Simple title extraction (fallback) ===
-function extractTitle(text, maxLen = 10) {
+function extractTitle(text, maxLen = 12) {
   if (!text || text.length === 0) return "新对话";
   let cleaned = text
+    .replace(/openclaw/gi, "OC")
+    .replace(/^(目前|现在|当前)\s*/, "")
     .replace(/^(你好|嗨|hi|hello|hey|请问|帮我|我想|我要|能不能|可以|来|给我|开始)\s*/i, "")
     .trim();
+
+  const channelQuery = cleaned.match(/^(OC).*?(?:配置|支持).*?频道/i);
+  if (channelQuery) return "OC频道配置查询";
+
   const sentences = cleaned.split(/[，。！？\n;；,]/).filter(Boolean);
   const firstSeg = sentences[0] || cleaned;
   let title = firstSeg.slice(0, maxLen).trim();
@@ -225,10 +200,9 @@ export default definePluginEntry({
     if (config.enabled === false) { log.info("Plugin disabled"); return; }
 
     const pollIntervalMs = config.pollIntervalMs || 8000;
-    const titleMaxLen = config.titleMaxLen || 10;
     const mode = config.mode || "llm";
 
-    log.info(`v2.3 started (interval=${pollIntervalMs}ms, mode=${mode})`);
+    log.info(`v2.8 started (interval=${pollIntervalMs}ms, mode=${mode})`);
 
     const renamedSessions = new Set();
     const waitingSessions = new Set();
@@ -251,8 +225,6 @@ export default definePluginEntry({
     }
 
     // ─── 检测 & 处理 reset 会话 ──────────────────────────
-    // 当一个会话被 reset，OpenClaw 会创建  sessionId.jsonl.reset.TIMESTAMP 文件
-    // 此时应清除旧的 displayName 和 tracker 条目，让新对话可以重命名
     function detectAndHandleResets(sessionsDir, sessions, files) {
       const tracker = loadTracker(sessionsDir);
       let trackerChanged = false;
@@ -262,11 +234,9 @@ export default definePluginEntry({
         const sessionId = sessionData.sessionId;
         if (!sessionId) continue;
 
-        // 检查此 session 是否有 .reset. 文件
         const hasResetFile = files.some(f => f.startsWith(sessionId) && f.includes(".reset."));
         if (!hasResetFile) continue;
 
-        // 如果之前重命名过，清除
         if (tracker[sessionKey] || renamedSessions.has(sessionKey)) {
           delete tracker[sessionKey];
           renamedSessions.delete(sessionKey);
@@ -290,8 +260,6 @@ export default definePluginEntry({
     }
 
     // ─── 名称守卫：防止 gateway 覆盖 displayName ─────────
-    // 长时间不用的会话再对话时，gateway 可能恢复默认标题
-    // 定期检查 tracker 中的会话，如果 displayName 被改掉就重新写入
     function guardNames(sessionsDir, sessions, files) {
       const tracker = loadTracker(sessionsDir);
       let changed = false;
@@ -300,7 +268,6 @@ export default definePluginEntry({
         const sessionData = sessions[sessionKey];
         if (!sessionData) continue;
 
-        // 跳过仍有 reset 文件的会话（已通过 detectAndHandleResets 处理）
         const sessionId = sessionData.sessionId;
         if (sessionId && files.some(f => f.startsWith(sessionId) && f.includes(".reset."))) {
           continue;
@@ -310,7 +277,7 @@ export default definePluginEntry({
         if (currentName !== meta.title) {
           sessionData.displayName = meta.title;
           changed = true;
-          log.info(`🛡 Guarded name "${meta.title}" → ${sessionKey.slice(0, 48)}...`);
+          log.info(`🛡 Guarded name → "${meta.title}" (${sessionKey.slice(0, 48)}...)`);
         }
       }
 
@@ -323,7 +290,6 @@ export default definePluginEntry({
         const sessionsDir = getSessionsDir();
         if (!fs.existsSync(sessionsDir)) return;
 
-        // 读取 files + sessions.json（一次性）
         const files = fs.readdirSync(sessionsDir);
         const result = readSessionsJson(sessionsDir);
         if (!result) return;
@@ -331,13 +297,9 @@ export default definePluginEntry({
 
         let anyChange = false;
 
-        // Phase 1: 处理 Reset 会话
         anyChange = detectAndHandleResets(sessionsDir, sessions, files) || anyChange;
-
-        // Phase 2: 名称守卫（反回退）
         anyChange = guardNames(sessionsDir, sessions, files) || anyChange;
 
-        // Phase 3: 新会话重命名
         for (const [sessionKey, sessionData] of Object.entries(sessions)) {
           if (renamedSessions.has(sessionKey)) continue;
           if (sessionData.displayName || sessionData.display_name) {
@@ -348,7 +310,6 @@ export default definePluginEntry({
           const sessionId = sessionData.sessionId;
           if (!sessionId) continue;
 
-          // 找活跃的 jsonl 文件（排除 .reset. / .deleted / .trajectory）
           let sessionFile = path.join(sessionsDir, `${sessionId}.jsonl`);
           if (!fs.existsSync(sessionFile)) {
             try {
@@ -376,9 +337,9 @@ export default definePluginEntry({
             if (!title) {
               const failures = (llmFailureCounts.get(sessionKey) || 0) + 1;
               llmFailureCounts.set(sessionKey, failures);
-              const retryMaxAttempts = config.retryMaxAttempts || 30;
+              const retryMaxAttempts = config.retryMaxAttempts || 5;
               if (failures < retryMaxAttempts) {
-                log.info(`⏳ LLM unavailable/invalid; retry ${failures}/${retryMaxAttempts} → ${sessionKey.slice(0, 48)}...`);
+                log.info(`⏳ LLM unavailable; retry ${failures}/${retryMaxAttempts} → ${sessionKey.slice(0, 48)}...`);
                 continue;
               }
               log.warn(`LLM failed ${failures} times; using extract fallback → ${sessionKey.slice(0, 48)}...`);
@@ -387,9 +348,9 @@ export default definePluginEntry({
             }
           }
           if (!title) {
-            title = extractTitle(firstUserMsg, titleMaxLen);
+            title = extractTitle(firstUserMsg);
           }
-          if (!title || title.length < 2) title = "新对话";
+          if (!title) title = "新对话";
 
           if (sessions[sessionKey]) {
             sessions[sessionKey].displayName = title;
@@ -400,7 +361,6 @@ export default definePluginEntry({
           }
         }
 
-        // 一次性写入 sessions.json（减少磁盘写入，防竞态）
         if (anyChange) writeSessionsJson(sessionsFilePath, sessions);
 
       } catch (err) {
@@ -410,7 +370,6 @@ export default definePluginEntry({
       }
     }
 
-    // 独立的 saveTrackerEntry（供 Phase 3 用，不依赖内部 trackers 变量）
     function saveTrackerEntry(sessionsDir, sessionKey, title) {
       try {
         const tracker = loadTracker(sessionsDir);
@@ -419,7 +378,6 @@ export default definePluginEntry({
       } catch (e) { log.warn(`Tracker write: ${e.message}`); }
     }
 
-    // Init
     const sessionsDir = getSessionsDir();
     if (fs.existsSync(sessionsDir)) syncTrackers(sessionsDir);
 
